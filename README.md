@@ -2,13 +2,7 @@
 This repo is for trying out citus-terraform
 
 ## Variables file usage
-This project reads required deployment inputs from `terraform.tfvars` (ignored by git), so you can run Terraform without passing `-var` flags.
-
-Start by copying the template and then set values:
-
-```bash
-cp terraform.tfvars.example terraform.tfvars
-```
+This project now reads required deployment inputs from `terraform.tfvars`, so you can run Terraform without passing `-var` flags.
 
 Set these values in `terraform.tfvars` before apply:
 - `existing_vpc_id`
