@@ -1,12 +1,11 @@
 output "vpc_id" {
-  value = module.vpc.vpc_id
+  description = "Existing VPC used for deployment"
+  value       = var.existing_vpc_id
 }
+
 output "private_subnet_ids" {
-  value = module.vpc.private_subnet_ids
-}
-output "bastion_public_ip" {
-  description = "The public IP address of the bastion host"
-  value       = module.bastion.bastion_public_ip
+  description = "Private subnets used for deployment"
+  value       = var.existing_private_subnet_ids
 }
 
 # Citus Module Outputs
@@ -34,4 +33,3 @@ output "ec2_volume_attach_role_arn" {
   description = "ARN of the EC2 Volume Attach IAM role"
   value       = module.citus.ec2_volume_attach_role_arn
 }
-
