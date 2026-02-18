@@ -19,7 +19,7 @@ PGDATA="/var/lib/postgresql/$PGVER/main"
 BACKUP_DIR="${PGDATA}_old"
 MNT="/mnt/newvolume"
 DEVICE_PATH=""
-VOLUME_ID_NO_DASH="$${VOLUME_ID#vol-}"
+VOLUME_ID_NO_DASH="${VOLUME_ID#vol-}"
 # --------------------------------------------
 # Get IMDSv2 token and metadata
 # --------------------------------------------
@@ -128,7 +128,7 @@ for i in {1..40}; do
 done
 
 if [ -z "$DEVICE_PATH" ]; then
-  DEVICE_PATH="$(readlink -f "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$${VOLUME_ID}" 2>/dev/null || true)"
+  DEVICE_PATH="$(readlink -f "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${VOLUME_ID}" 2>/dev/null || true)"
 fi
 
 if [ -z "$DEVICE_PATH" ]; then
