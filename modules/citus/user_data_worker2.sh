@@ -15,11 +15,11 @@ DB_NAME="postgres"
 HOSTED_ZONE_ID=${hosted_zone_id}
 
 PGVER=17
-DEVICE="/dev/nvme1n1"   # New EBS disk
 PGDATA="/var/lib/postgresql/$PGVER/main"
 BACKUP_DIR="${PGDATA}_old"
 MNT="/mnt/newvolume"
-FSTAB_ENTRY="$DEVICE $PGDATA ext4 defaults,nofail 0 2"
+DEVICE_PATH=""
+VOLUME_ID_NO_DASH="${VOLUME_ID#vol-}"
 # --------------------------------------------
 # Get IMDSv2 token and metadata
 # --------------------------------------------
@@ -65,37 +65,78 @@ ATTACHED_INSTANCE=$(aws ec2 describe-volumes \
 if [[ "$ATTACHED_INSTANCE" != "None" && "$ATTACHED_INSTANCE" != "$INSTANCE_ID" ]]; then
   echo "⚠️ Detaching from $ATTACHED_INSTANCE"
   aws ec2 detach-volume --volume-id "$VOLUME_ID" --region "$REGION"
-  sleep 10
+
+  echo "⏳ Waiting for volume to become available after detach..."
+  for i in {1..40}; do
+    STATE=$(aws ec2 describe-volumes       --volume-ids "$VOLUME_ID" --region "$REGION"       --query "Volumes[0].State" --output text)
+    if [ "$STATE" = "available" ]; then
+      break
+    fi
+    sleep 3
+  done
+
+  if [ "$STATE" != "available" ]; then
+    echo "❌ Volume $VOLUME_ID did not become available after detach"
+    exit 1
+  fi
 fi
 
 #######################################
 ### ATTACH VOLUME
 #######################################
-echo "📎 Attaching $VOLUME_ID as $DEVICE_NAME..."
-aws ec2 attach-volume \
-  --volume-id "$VOLUME_ID" \
-  --instance-id "$INSTANCE_ID" \
-  --device "$DEVICE_NAME" \
-  --region "$REGION"
+CURRENT_ATTACHMENT=$(aws ec2 describe-volumes   --volume-ids "$VOLUME_ID" --region "$REGION"   --query "Volumes[0].Attachments[0].InstanceId" --output text)
 
-#######################################
-### WAIT FOR NVMe DEVICE
-#######################################
-echo "⏳ Waiting for NVMe device..."
-for i in {1..30}; do
-  DEVICE_PATH=$(lsblk -o NAME,TYPE | awk '/disk/ && /nvme/ {print "/dev/"$1; exit}')
-  if [ -n "$DEVICE_PATH" ]; then
+if [ "$CURRENT_ATTACHMENT" = "$INSTANCE_ID" ]; then
+  echo "✅ Volume $VOLUME_ID is already attached to this instance"
+else
+  echo "📎 Attaching $VOLUME_ID as $DEVICE_NAME..."
+  aws ec2 attach-volume     --volume-id "$VOLUME_ID"     --instance-id "$INSTANCE_ID"     --device "$DEVICE_NAME"     --region "$REGION"
+fi
+
+echo "⏳ Waiting for volume attachment state..."
+for i in {1..40}; do
+  ATTACH_STATE=$(aws ec2 describe-volumes     --volume-ids "$VOLUME_ID" --region "$REGION"     --query "Volumes[0].Attachments[0].State" --output text)
+  ATTACH_INSTANCE=$(aws ec2 describe-volumes     --volume-ids "$VOLUME_ID" --region "$REGION"     --query "Volumes[0].Attachments[0].InstanceId" --output text)
+
+  if [ "$ATTACH_INSTANCE" = "$INSTANCE_ID" ] && [ "$ATTACH_STATE" = "attached" ]; then
     break
   fi
   sleep 3
 done
 
-if [ -z "$DEVICE_PATH" ]; then
-  echo "❌ NVMe device not found"
+if [ "$ATTACH_INSTANCE" != "$INSTANCE_ID" ] || [ "$ATTACH_STATE" != "attached" ]; then
+  echo "❌ Volume did not reach attached state on this instance"
   exit 1
 fi
 
-echo "✅ EBS device: $DEVICE_PATH"
+#######################################
+### RESOLVE NVMe DEVICE FOR THIS VOLUME
+#######################################
+echo "⏳ Resolving NVMe device for $VOLUME_ID..."
+for i in {1..40}; do
+  for candidate in /dev/nvme*n1; do
+    [ -e "$candidate" ] || continue
+    if command -v nvme >/dev/null 2>&1; then
+      serial=$(sudo nvme id-ctrl -v "$candidate" 2>/dev/null | awk -F: '/^sn[[:space:]]*:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')
+      if [ "$serial" = "$VOLUME_ID" ] || [ "$serial" = "$VOLUME_ID_NO_DASH" ]; then
+        DEVICE_PATH="$candidate"
+        break 2
+      fi
+    fi
+  done
+  sleep 3
+done
+
+if [ -z "$DEVICE_PATH" ]; then
+  DEVICE_PATH="$(readlink -f "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${VOLUME_ID}" 2>/dev/null || true)"
+fi
+
+if [ -z "$DEVICE_PATH" ]; then
+  echo "❌ Could not map volume $VOLUME_ID to an NVMe block device"
+  exit 1
+fi
+
+echo "✅ EBS device for $VOLUME_ID: $DEVICE_PATH"
 
 
 # ====== POSTGRES CONFIG ======
@@ -136,19 +177,19 @@ sudo mkdir -p $MNT
 
 
 echo "Checking if EBS volume has a filesystem..."
-FS_CHECK=$(sudo file -s $DEVICE)
+FS_CHECK=$(sudo file -s "$DEVICE_PATH")
 
 if echo "$FS_CHECK" | grep -q "filesystem"; then
     echo "✅ Volume already has a filesystem — skipping formatting."
 else
     echo "🆕 Volume is empty — formatting as ext4."
-    sudo mkfs.ext4 $DEVICE
+    sudo mkfs.ext4 "$DEVICE_PATH"
     echo "✅ Formatting completed."
 fi
 
 
 echo "Mounting temporarily..."
-sudo mount $DEVICE $MNT
+sudo mount "$DEVICE_PATH" "$MNT"
 
 
 echo "Checking if new EBS volume is empty..."
@@ -172,14 +213,16 @@ echo "Unmounting temp mount..."
 sudo umount $MNT
 
 echo "Mounting volume to Postgres data path..."
-sudo mount $DEVICE $PGDATA
+sudo mount "$DEVICE_PATH" "$PGDATA"
 
 echo "Setting correct permissions..."
 sudo chown -R postgres:postgres $PGDATA
 sudo chmod 700 $PGDATA
 
 echo "Updating /etc/fstab..."
-if ! grep -q "$DEVICE" /etc/fstab; then
+DEVICE_UUID=$(sudo blkid -s UUID -o value "$DEVICE_PATH")
+FSTAB_ENTRY="UUID=$DEVICE_UUID $PGDATA ext4 defaults,nofail 0 2"
+if ! grep -q "UUID=$DEVICE_UUID" /etc/fstab; then
     echo "$FSTAB_ENTRY" | sudo tee -a /etc/fstab
 fi
 
